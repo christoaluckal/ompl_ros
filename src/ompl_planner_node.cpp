@@ -7,6 +7,7 @@
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
+#include "std_msgs/msg/float32.hpp"
 
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/geometric/SimpleSetup.h>
@@ -32,7 +33,8 @@ namespace og = ompl::geometric;
 class Plane2DEnvironment
 {
 public:
-    Plane2DEnvironment(const char *ppm_file ="", bool use_deterministic_sampling = false, int min_solutions_ = 3)
+    double threshold_;
+    Plane2DEnvironment(const char *ppm_file ="", bool use_deterministic_sampling = false, int min_solutions_ = 3, double threshold = 50.0)
     {
         useDeterministicSampling_ = use_deterministic_sampling;
         min_solutions = min_solutions_;
@@ -46,12 +48,14 @@ public:
             first_map_set = true;
             resetMap(ppm_file, use_deterministic_sampling);
         }
+        threshold_ = threshold;
     }
 
 
     void resetMap(const char *ppm_file, bool use_deterministic_sampling = false)
     {
         bool ok = false;
+        std::cout << "Loading " << ppm_file << std::endl;
         try
         {
             ppm_.loadFile(ppm_file);
@@ -61,22 +65,46 @@ public:
         {
             OMPL_ERROR("Unable to load %s.\n%s", ppm_file, ex.what());
         }
+        std::cout << "Loaded " << ppm_file << std::endl;
+        std::cout << "Check if the map is set: " << ok << std::endl;
         if (ok)
         {
-            auto space = std::dynamic_pointer_cast<ob::RealVectorStateSpace>(ss_->getStateSpace());
-            space->setBounds(0.0, ppm_.getWidth());
-            space->setBounds(1.0, ppm_.getHeight());
-            maxWidth_ = ppm_.getWidth() - 1;
-            maxHeight_ = ppm_.getHeight() - 1;
-            ss_->getStateSpace()->setup();
-            ss_->getSpaceInformation()->setStateValidityCheckingResolution(1.0 / space->getMaximumExtent());
+            std::cout << "Making space information" << std::endl;
+             auto space(std::make_shared<ob::RealVectorStateSpace>());
+             space->addDimension(0.0, ppm_.getWidth());
+             space->addDimension(0.0, ppm_.getHeight());
+             maxWidth_ = ppm_.getWidth() - 1;
+             maxHeight_ = ppm_.getHeight() - 1;
+             ss_ = std::make_shared<og::SimpleSetup>(space);
+  
+             // set state validity checking for this space
+             ss_->setStateValidityChecker([this](const ob::State *state) { return isStateValid(state); });
+             space->setup();
+             ss_->getSpaceInformation()->setStateValidityCheckingResolution(1.0 / space->getMaximumExtent());
+
             first_map_set = true;
+            double max_val = 0;
+            for(int i=0;i<ppm_.getHeight();i++)
+            {
+                for(int j=0;j<ppm_.getWidth();j++)
+                {
+                    const ompl::PPM::Color &c = ppm_.getPixel(i, j);
+                    double gray = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+                    if (gray > max_val)
+                    {
+                        max_val = gray;
+                    }
+                }
+            }
+            std::cout << "Max value: " << max_val << std::endl;
         }
+        std::cout << "Map set: " << first_map_set << std::endl;
         if (useDeterministicSampling_)
         {
             // PRMstar can use the deterministic sampling
             ss_->setPlanner(std::make_shared<og::PRMstar>(ss_->getSpaceInformation()));
         }
+        return;
     }
 
     bool plan(unsigned int start_row, unsigned int start_col, unsigned int goal_row, unsigned int goal_col)
@@ -178,8 +206,9 @@ private:
 
         const ompl::PPM::Color &c = ppm_.getPixel(h, w);
         double gray = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+        std::cout << "W: " << w << " H: " << h << " Gray: " << gray << std::endl;
     //  return c.red > 127 && c.green > 127 && c.blue > 127;
-    return gray < 127;
+    return gray < threshold_;
     }
 
     ob::StateSamplerPtr allocateHaltonStateSamplerRealVector(const ompl::base::StateSpace *space, unsigned int dim,
@@ -196,14 +225,14 @@ private:
     }
 
     
-
+    std::shared_ptr<ob::RealVectorStateSpace> space_;
     og::SimpleSetupPtr ss_;
     int maxWidth_;
     int maxHeight_;
     ompl::PPM ppm_;
     int min_solutions;
     bool useDeterministicSampling_;
-    double threshold_;
+    
     bool first_map_set;
 };
 
@@ -228,6 +257,9 @@ public:
 
     waypoint_publisher = this->create_publisher<std_msgs::msg::Bool>("computedwaypoints", 1);
 
+    threshold_updater = this->create_subscription<std_msgs::msg::Float32>(
+      "threshold", 1, std::bind(&MinimalPublisher::updateThreshold, this, _1));
+
     path_set = false;
   }
 
@@ -249,15 +281,55 @@ private:
     RCLCPP_INFO(this->get_logger(), "Setting New Image at: '%s'", msg.data.c_str());
     std::string path = msg.data.c_str();
     env.resetMap(path.c_str());
+    path_set = true;
   }
   void getPath(const std_msgs::msg::Float32MultiArray &msg)
   {
     RCLCPP_INFO(this->get_logger(), "Getting Path");
+    if(!path_set)
+    {
+      RCLCPP_INFO(this->get_logger(), "No path set");
+      return;
+    }
+    std::vector<float> data = msg.data;
+    if (data.size() != 4)
+    {
+      RCLCPP_INFO(this->get_logger(), "Invalid data");
+      return;
+    }
+    unsigned int start_row = int(data[0]);
+    unsigned int start_col = int(data[1]);
+    unsigned int goal_row = int(data[2]);
+    unsigned int goal_col = int(data[3]);
+    env.plan(start_row, start_col, goal_row, goal_col);
+    env.recordSolution();
+    env.save("/home/christoa/Developer/summer2024/ros2_ws/src/ompl_ros/src/result.ppm");
+    // env.returnPath();
+    std::vector<std::vector<double>> path = env.returnPath();
+    if (path.size() == 0)
+    {
+      RCLCPP_INFO(this->get_logger(), "No path found");
+      return;
+    }
+    for(int i = 0; i < path.size(); i++)
+    {
+      RCLCPP_INFO(this->get_logger(), "Path: %f, %f", path[i][0], path[i][1]);
+    }
+
+
+
+  }
+
+  void updateThreshold(const std_msgs::msg::Float32 &msg)
+  {
+    RCLCPP_INFO(this->get_logger(), "Updating Threshold from %f to %f", env.threshold_, msg.data);
+    env.updateThreshold(msg.data);
   }
 
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr image_set_subscriber;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr getpath_subscriber;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr waypoint_publisher;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr threshold_updater;
 
   size_t count_;
   bool path_set;
