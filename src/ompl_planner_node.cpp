@@ -34,7 +34,7 @@ class Plane2DEnvironment
 {
 public:
     double threshold_;
-    Plane2DEnvironment(const char *ppm_file ="", bool use_deterministic_sampling = false, int min_solutions_ = 3, double threshold = 50.0)
+    Plane2DEnvironment(const char *ppm_file ="", bool use_deterministic_sampling = false, int min_solutions_ = 10, double threshold = 50.0)
     {
         useDeterministicSampling_ = use_deterministic_sampling;
         min_solutions = min_solutions_;
@@ -81,7 +81,9 @@ public:
              ss_->setStateValidityChecker([this](const ob::State *state) { return isStateValid(state); });
              space->setup();
              ss_->getSpaceInformation()->setStateValidityCheckingResolution(1.0 / space->getMaximumExtent());
-
+            space->setStateSamplerAllocator(std::bind(&Plane2DEnvironment::allocateHaltonStateSamplerRealVector,
+                                                           this, std::placeholders::_1, 2,
+                                                           std::vector<unsigned int>{2, 3}));
             first_map_set = true;
             double max_val = 0;
             for(int i=0;i<ppm_.getHeight();i++)
@@ -117,11 +119,11 @@ public:
             return false;
         }
         ob::ScopedState<> start(ss_->getStateSpace());
-        start[0] = start_row;
-        start[1] = start_col;
+        start[1] = start_row;
+        start[0] = start_col;
         ob::ScopedState<> goal(ss_->getStateSpace());
-        goal[0] = goal_row;
-        goal[1] = goal_col;
+        goal[1] = goal_row;
+        goal[0] = goal_col;
         ss_->setStartAndGoalStates(start, goal);
         // generate a few solutions; all will be added to the goal;
         for (int i = 0; i < min_solutions; ++i)
@@ -178,6 +180,7 @@ public:
             const int w = std::min(maxWidth_, (int)p.getState(i)->as<ob::RealVectorStateSpace::StateType>()->values[0]);
             const int h =
                 std::min(maxHeight_, (int)p.getState(i)->as<ob::RealVectorStateSpace::StateType>()->values[1]);
+            // ompl::PPM::Color &c = record_.getPixel(h, w);
             ompl::PPM::Color &c = ppm_.getPixel(h, w);
             c.red = 255;
             c.green = 0;
@@ -190,7 +193,23 @@ public:
         if (!ss_)
             return;
         ppm_.saveFile(filename);
-        std::cout << "Saved the result to '" << filename << "'" << std::endl;
+        // record_.saveFile(filename);
+        // std::cout << "Saved the result to '" << filename << "'" << std::endl;
+
+        // const int w = maxWidth_;
+        // const int h = maxHeight_;
+        // for(int i=0;i<h;i++)
+        // {
+        //     for(int j=0;j<w;j++)
+        //     {
+        //         ompl::PPM::Color &og_color = ppm_.getPixel(h, w);
+        //         ompl::PPM::Color &temp_color = ppm_.getPixel(h, w);
+        //         temp_color.red = og_color.red;
+        //         temp_color.blue = og_color.blue;
+        //         temp_color.green = og_color.green;
+        //     }
+        // }
+
     }
 
     void updateThreshold(double new_thresh)
@@ -206,7 +225,7 @@ private:
 
         const ompl::PPM::Color &c = ppm_.getPixel(h, w);
         double gray = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
-        std::cout << "W: " << w << " H: " << h << " Gray: " << gray << std::endl;
+        // std::cout << "W: " << w << " H: " << h << " Gray: " << gray << std::endl;
     //  return c.red > 127 && c.green > 127 && c.blue > 127;
     return gray < threshold_;
     }
@@ -229,7 +248,7 @@ private:
     og::SimpleSetupPtr ss_;
     int maxWidth_;
     int maxHeight_;
-    ompl::PPM ppm_;
+    ompl::PPM ppm_,record_;
     int min_solutions;
     bool useDeterministicSampling_;
     
@@ -255,7 +274,7 @@ public:
     getpath_subscriber = this->create_subscription<std_msgs::msg::Float32MultiArray>(
       "getpath", 1, std::bind(&MinimalPublisher::getPath, this, _1));
 
-    waypoint_publisher = this->create_publisher<std_msgs::msg::Bool>("computedwaypoints", 1);
+    waypoint_publisher = this->create_publisher<std_msgs::msg::Float32MultiArray>("computedwaypoints", 1);
 
     threshold_updater = this->create_subscription<std_msgs::msg::Float32>(
       "threshold", 1, std::bind(&MinimalPublisher::updateThreshold, this, _1));
@@ -303,7 +322,7 @@ private:
     unsigned int goal_col = int(data[3]);
     env.plan(start_row, start_col, goal_row, goal_col);
     env.recordSolution();
-    env.save("/home/christoa/Developer/summer2024/ros2_ws/src/ompl_ros/src/result.ppm");
+    env.save("/home/u22/ros2_ws/src/ompl_ros/src/result.ppm");
     // env.returnPath();
     std::vector<std::vector<double>> path = env.returnPath();
     if (path.size() == 0)
@@ -311,12 +330,17 @@ private:
       RCLCPP_INFO(this->get_logger(), "No path found");
       return;
     }
+    std::vector<std::vector<float>> output_vec;
+    std_msgs::msg::Float32MultiArray output_msg;
+
     for(int i = 0; i < path.size(); i++)
     {
       RCLCPP_INFO(this->get_logger(), "Path: %f, %f", path[i][0], path[i][1]);
+      output_msg.data.push_back(path[i][1]);
+      output_msg.data.push_back(path[i][0]);
     }
 
-
+    waypoint_publisher->publish(output_msg);
 
   }
 
@@ -328,8 +352,8 @@ private:
 
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr image_set_subscriber;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr getpath_subscriber;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr waypoint_publisher;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr threshold_updater;
+  rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr waypoint_publisher;
 
   size_t count_;
   bool path_set;
